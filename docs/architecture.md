@@ -35,9 +35,9 @@ flowchart TD
         D4[("telemetry_records (UNIQUE timestamp & CHECK constraints)")]
     end
 
-    A1 -->|POST /sessions/{id}/ingest + Idempotency-Key| B1
-    A2 -->|GET /sessions/{id}/records| B1
-    A3 -->|GET /sessions/{id}/export?format=jsonl| B1
+    A1 -->|"POST /sessions/{id}/ingest + Idempotency-Key"| B1
+    A2 -->|"GET /sessions/{id}/records"| B1
+    A3 -->|"GET /sessions/{id}/export?format=jsonl"| B1
 
     B1 --> B2 --> C1
     B1 --> C2

@@ -61,9 +61,9 @@ flowchart TD
         T3[("telemetry_records (UNIQUE timestamp & CHECK constraints)")]
     end
 
-    L -->|POST /sessions/{id}/ingest| MW --> VAL --> ROUT --> ING
-    E -->|GET /sessions/{id}/records| MW --> ROUT --> QRY
-    AI -->|GET /sessions/{id}/export| MW --> ROUT --> EXP
+    L -->|"POST /sessions/{id}/ingest"| MW --> VAL --> ROUT --> ING
+    E -->|"GET /sessions/{id}/records"| MW --> ROUT --> QRY
+    AI -->|"GET /sessions/{id}/export"| MW --> ROUT --> EXP
 
     ING -->|BEGIN ... COMMIT / ROLLBACK| T2
     ING -->|Bulk Write| T3
