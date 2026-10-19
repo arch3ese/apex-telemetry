@@ -1,114 +1,169 @@
 # ApexTelemetry Platform
 
-[![CI Pipeline](https://github.com/apex-telemetry/apex-telemetry/actions/workflows/ci.yml/badge.svg)](https://github.com/apex-telemetry/apex-telemetry/actions)
+[![CI Pipeline](https://github.com/arch3ese/apex-telemetry/actions/workflows/ci.yml/badge.svg)](https://github.com/arch3ese/apex-telemetry/actions)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688.svg)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg)](https://www.postgresql.org/)
 [![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0_Async-d71f00.svg)](https://www.sqlalchemy.org/)
 [![Code Style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-A high-performance, transactional REST platform engineered to ingest, validate, store, query, and export high-frequency vehicle dynamics and CAN-bus telemetry datasets under strict physical plausibility constraints and database-enforced concurrency guarantees.
+Asynchronous telemetry ingestion, session management, and vehicle dynamics analysis platform built with FastAPI, PostgreSQL, and SQLAlchemy 2.0. Engineered for post-run trackside offload, atomic multi-channel batch ingestion, and vehicle dynamics performance analysis.
 
 ---
 
-## The Real-World Engineering Problem
+## Architecture and Domain Context
 
-During track testing, dyno calibration, and autonomous vehicle runs, multichannel loggers stream high-frequency sensor readings (wheel speeds, longitudinal/lateral accelerations, yaw rate, steering angles, brake line pressures) at 10 Hz to 100 Hz. In practice:
+In automotive and motorsport testing, on-car Data Acquisition (DAQ) loggers (e.g. MoTeC, Bosch Motorsport, AiM) record raw CAN-bus sensor channels to binary formats (`.ld`, `.mdf4`) at frequencies between 10 Hz and 1000 Hz. 
 
-1. **Network Dropouts & Duplication:** Edge loggers upload batches over trackside cellular/Wi-Fi. Network dropouts cause HTTP timeout retries. Without strict idempotency, retries duplicate sensor records, corrupting tire-slip models and energy integrations.
-2. **Silent Physical Glitches:** Failing sensors or CAN bus bitflips emit values that violate the laws of physics (e.g. negative hydraulic brake pressure, lateral acceleration $> 5.0g$ on street asphalt, or negative wheel speeds).
-3. **Partial Batch Contamination:** When an un-transactional ingestor crashes on record #450 out of a 500-record batch, records 1–449 remain in the database, leaving an incomplete, un-reproducible slice.
-4. **Export Memory Exhaustion:** Machine learning pipelines export 100,000+ observations. In-memory serializations spike RAM and crash API workers with out-of-memory (OOM) errors.
+When a vehicle returns to the pitlane, or transmits telemetry bursts over trackside Wi-Fi/LTE, data is offloaded to central engineering services. Raw binary dumps must be parsed into structured session datasets for cross-session driver comparison, powertrain shift analysis, and tire friction modeling.
+
+ApexTelemetry operates as the post-session engineering platform responsible for:
+1. **Idempotent Ingestion:** Preventing data duplication when network retries occur over lossy paddock Wi-Fi.
+2. **Transactional Atomicity:** Rolling back partially failed batch uploads to ensure corrupted sensor slices never reach analytical models.
+3. **Physical Domain Validation:** Enforcing plausible vehicle bounds (e.g. non-negative brake line pressure, realistic wheel speeds, and grip bounds).
+4. **Vehicle Dynamics Analysis:** Computing G-G friction traction circles, corner apex speeds, trail braking decay, and powertrain gear ratios from synchronized channel observations.
+5. **Bounded Memory Streaming:** Exporting large multi-lap datasets as CSV and JSONL using server-side database cursors without exhausting server RAM.
+
+```mermaid
+flowchart LR
+    subgraph OnCar["On-Car DAQ System"]
+        CAN["CAN-Bus Sensors (100 Hz)"] --> ECU["ECU / Chassis Sensors"]
+        ECU --> LOGGER["On-Car Logger (Binary / CAN)"]
+    end
+
+    subgraph Trackside["Paddock / Offload Layer"]
+        LOGGER -->|"Pitlane Wi-Fi / LTE Burst"| PARSER["Edge Parsing & Dispatch Agent"]
+    end
+
+    subgraph Backend["ApexTelemetry Platform (This Service)"]
+        PARSER -->|"POST /sessions/{session_id}/ingest (Idempotency-Key)"| API["FastAPI Ingestion Router"]
+        API --> VAL["Physical Plausibility & SHA-256 Checksum"]
+        VAL --> TX["Atomic Transaction Manager"]
+        TX --> PG[("PostgreSQL 16 Engine")]
+        
+        ANL["Vehicle Dynamics Service"] --> PG
+        EXP["Streaming Export Generator"] --> PG
+    end
+
+    subgraph Engineering["Consumers"]
+        ANL -->|"G-G Friction Circle & Braking Zones"| ENG["Performance & Race Engineers"]
+        EXP -->|"O(1) Memory Chunked CSV / JSONL"| ML["Simulation & Data Science Models"]
+    end
+```
 
 ---
 
 ## Core Engineering Guarantees
 
-- **Guaranteed Idempotency:** Client retries using the `Idempotency-Key` header verify an explicit `UNIQUE(session_id, idempotency_key)` constraint. Duplicate requests return `200 OK` with `is_idempotent_replay: true` and write **0 duplicate rows**.
-- **Cryptographic Tamper Detection:** A deterministic **SHA-256 fingerprint** of the payload detects accidental key collisions or payload modifications (`409 Conflict`).
-- **Atomic Rollback:** If even 1 record in a 5,000-reading batch violates database constraints, **100% of the batch is rolled back**. An audit entry in `ingestion_jobs` captures the exact constraint diagnostic.
-- **Physical Plausibility Bounds:** Validates brake pressure $[0.0, 250.0]\,\text{bar}$, wheel speeds $[0.0, 450.0]\,\text{km/h}$, and grip limits $[-5.0, +5.0]\,g$.
-- **Constant Memory $O(1)$ Streaming:** Server-side database cursors (`stream_scalars()`) pipe chunked CSV and JSONL records directly over HTTP sockets with flat memory usage.
-- **Dual-Paradigm Pagination:** Limit/offset pagination for dashboards, and keyset cursor-based pagination `(recorded_at, id)` immune to page-drift anomalies.
+- **Database-Enforced Idempotency:** Client retries using the `Idempotency-Key` header leverage a composite `UNIQUE(session_id, idempotency_key)` constraint. Duplicate requests return `200 OK` with `is_idempotent_replay: true` and write 0 duplicate rows to PostgreSQL, eliminating time-of-check to time-of-use (TOCTOU) race conditions.
+- **Payload Integrity Verification:** A deterministic SHA-256 checksum of batch readings identifies payload mutation or key collisions (`409 Conflict`).
+- **Atomic Batch Rollback:** Batches are committed within isolated transactions. If any observation violates schema constraints (e.g., unique timestamp or quality flag range), the entire batch is rolled back and an audit failure record is logged in `ingestion_jobs`.
+- **Physical Plausibility Bounds:** Validates sensor limits (brake pressure $[0.0, 250.0]\,\text{bar}$, wheel speeds $[0.0, 450.0]\,\text{km/h}$, acceleration $[-5.0, +5.0]\,g$).
+- **Constant Memory O(1) Streaming:** Database server-side cursors (`stream_scalars()`) pipe chunked CSV and JSONL datasets directly over HTTP sockets, maintaining flat memory usage regardless of dataset size.
+- **Keyset Cursor Pagination:** Paginated queries utilize composite index traversal `(recorded_at, id)` to prevent page-drift anomalies during concurrent inserts.
 
 ---
 
-## Architecture
+## Vehicle Dynamics Analysis Engine
 
-```mermaid
-flowchart TD
-    subgraph Clients["Data Sources & Consumers"]
-        L["Trackside CAN Logger"]
-        E["Dynamics Engineer"]
-        AI["AI / ML Training Pipeline"]
-    end
+ApexTelemetry includes an analysis service ([`src/apex_telemetry/services/analysis_service.py`](src/apex_telemetry/services/analysis_service.py)) for vehicle dynamics and powertrain data:
 
-    subgraph API["FastAPI Modular Monolith"]
-        MW["Correlation ID Middleware (X-Request-ID)"]
-        VAL["Pydantic v2 Schema & Domain Bounds"]
-        ROUT["API Routers (/sessions, /ingest, /records, /export)"]
-    end
+### 1. G-G Diagram and Tire Grip Utilization
+Computes the lateral vs. longitudinal acceleration friction ellipse:
+$$\text{Resultant Acceleration } a_{\text{comb}} = \sqrt{a_{\text{lat}}^2 + a_{\text{long}}^2}$$
+Calculates peak cornering grip, peak braking deceleration, 95th percentile sustained grip, and the percentage of lap time spent at high tire utilization ($\ge 80\%$ of peak grip).
 
-    subgraph Services["Orchestration Services"]
-        ING["IngestionService (Atomic Transactions)"]
-        QRY["TelemetryQueryService (Safe Parameterization)"]
-        EXP["Streaming Generator (O(1) Memory Cursors)"]
-    end
+### 2. Braking Zones and Corner Apex Dynamics
+Detects sustained braking phases ($a_{\text{long}} \le -0.6g$ or brake line pressure $> 5\,\text{bar}$), recording:
+- Brake initiation speed
+- Corner apex minimum speed ($V_{\text{min}}$)
+- Speed loss ($\Delta V$) and peak deceleration ($g$)
 
-    subgraph DB["PostgreSQL 16 Engine"]
-        T1[("test_sessions")]
-        T2[("ingestion_jobs (UNIQUE idempotency_key)")]
-        T3[("telemetry_records (UNIQUE timestamp & CHECK constraints)")]
-    end
+### 3. Powertrain Transmission Analysis
+Analyzes transmission shift points and gear transitions:
+- Identifies upshift events where engine speed drops rapidly while vehicle velocity is maintained.
+- Calculates pre-shift RPM, landing RPM, and RPM drop ($\Delta \text{RPM}$) to evaluate engine powerband alignment.
+- Computes effective drive ratios ($\text{RPM} / \text{km/h}$) across active gears.
 
-    L -->|"POST /sessions/{id}/ingest"| MW --> VAL --> ROUT --> ING
-    E -->|"GET /sessions/{id}/records"| MW --> ROUT --> QRY
-    AI -->|"GET /sessions/{id}/export"| MW --> ROUT --> EXP
+---
 
-    ING -->|BEGIN ... COMMIT / ROLLBACK| T2
-    ING -->|Bulk Write| T3
-    QRY -->|Indexed Scan| T3
-    EXP -->|Server-Side Cursor| T3
+## Real Motorsport Data Ingestion (FastF1 Integration)
+
+The repository provides an ingestion script ([`scripts/ingest_f1_session.py`](scripts/ingest_f1_session.py)) capable of ingesting Formula 1 telemetry directly via FastF1 or using calibrated high-frequency qualifying traces (Silverstone Circuit):
+
+```bash
+# Ingest calibrated Silverstone F1 qualifying telemetry and run dynamics analysis
+python scripts/ingest_f1_session.py --base-url http://localhost:8000
+```
+
+Sample output:
+```text
+============================================================
+APEXTELEMETRY VEHICLE DYNAMICS REPORT
+============================================================
+
+--- G-G Traction Circle & Grip Envelope ---
+  Total Data Points:        600
+  Peak Cornering Grip:      4.194 g
+  Peak Braking Decel:       3.800 g
+  Peak Combined Grip:       4.203 g
+  p95 Sustained Grip:       3.921 g
+  High Grip Utilization:    28.5% of operating time
+
+--- Braking Zones & Corner Apex Performance ---
+  Identified Braking Zones: 3
+  Mean Corner Apex Speed:   104.2 km/h
+  Max Deceleration:         3.80 g
+    Corner #1: Entry 310.0 km/h -> Apex 104.2 km/h (Loss: -205.8 km/h, Peak Decel: 3.8 g)
+
+--- Powertrain Transmission Analysis ---
+  Total Upshifts Logged:    7
+  Mean Shift RPM:           11551.0 RPM
+  Mean RPM Drop on Upshift: 980.0 RPM
+  Average RPM/km/h Ratio per Gear:
+    Gear 3: 64.63 RPM / (km/h)
+    Gear 5: 47.45 RPM / (km/h)
+    Gear 6: 41.53 RPM / (km/h)
+    Gear 7: 34.66 RPM / (km/h)
+============================================================
 ```
 
 ---
 
-## Verified Benchmark Results
+## Benchmarking
 
-Measured on a local 14-core Intel i7-13700H machine running PostgreSQL 16 Alpine via Docker Compose:
+Benchmark script (`scripts/benchmark.py`) measures concurrent batch ingestion and replay latency over HTTP using `httpx.AsyncClient` against the running PostgreSQL backend.
 
-| Metric | Result | Context |
-|---|---|---|
-| **Batch Ingestion Throughput** | **4,680.0 records / sec** | 8 concurrent workers pushing 100-record batches |
-| **Request Throughput** | **46.8 requests / sec** | Full Pydantic validation + SHA-256 hash + PostgreSQL commit |
-| **Ingestion Latency (p50)** | **149.5 ms** | Median commit latency under concurrent contention |
-| **Ingestion Latency (p99)** | **299.9 ms** | Tail latency under concurrency |
-| **Idempotent Replay Latency (p50)** | **29.1 ms** | **5.1x faster** (skips insert, returns cached state) |
-| **Filtered Query Latency (p50)** | **31.4 ms** | Parameterized B-tree compound index scan |
-
-*Reproduce anytime via:*
+Execution command:
 ```bash
 python scripts/benchmark.py --concurrency 8 --batches 5 --batch-size 100
 ```
+
+Observed performance (local test run on 14-core Intel i7, PostgreSQL 16 Alpine container):
+- **Ingestion Throughput:** 4,680.0 records / second (46.8 batch requests/sec across 4,000 total observations)
+- **Ingestion Latency (Median):** 149.5 ms
+- **Idempotent Replay Throughput:** 24,204.6 records / second
+- **Idempotent Replay Latency (Median):** 29.1 ms (~5.1x speedup by skipping inserts)
+- **Data Integrity:** 100% verification across all ingested channel observations
 
 ---
 
 ## Quickstart Guide
 
 ### 1. Prerequisites
-- **Python 3.12+** (tested on 3.13)
-- **Docker & Docker Compose**
+- Python 3.12 or 3.13
+- Docker and Docker Compose
 
-### 2. Clone & Spin up PostgreSQL
+### 2. Clone Repository and Start PostgreSQL
 ```bash
-git clone https://github.com/your-username/apex-telemetry.git
+git clone https://github.com/arch3ese/apex-telemetry.git
 cd apex-telemetry
 
-# Start PostgreSQL 16 container
+# Start PostgreSQL 16 Alpine container
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-### 3. Setup Virtual Environment & Dependencies
+### 3. Setup Python Virtual Environment
 ```bash
 python -m venv .venv
 
@@ -118,7 +173,7 @@ python -m venv .venv
 # Linux / macOS
 source .venv/bin/activate
 
-# Install package and development tools
+# Install package in editable mode with development dependencies
 pip install -e ".[dev]"
 ```
 
@@ -127,36 +182,39 @@ pip install -e ".[dev]"
 alembic upgrade head
 ```
 
-### 5. Deterministic Sample Data Seeding
-Populate realistic qualifying and shakedown test runs (Silverstone, Spa, Nürburgring) with synchronous CAN telemetry:
+### 5. Seed Test Data
+Populate sample test sessions (Silverstone, Spa-Francorchamps, Nürburgring) with CAN channel observations:
 ```bash
 python scripts/seed_data.py --samples 150
 ```
 
-### 6. Run the Application
+### 6. Run Application
 ```bash
 uvicorn apex_telemetry.main:app --reload --port 8000
 ```
-Interactive Swagger API documentation is immediately available at:  
-👉 **[http://localhost:8000/docs](http://localhost:8000/docs)**
+Interactive OpenAPI documentation is available at [http://localhost:8000/docs](http://localhost:8000/docs).
 
 ---
 
 ## Automated Test Suite
 
-The test suite runs against the **live PostgreSQL container** (not mocked SQLite) to verify real transactional serialization, check constraints, and concurrency race conditions:
+The test suite runs against the live PostgreSQL container (configured via `NullPool` in `tests/conftest.py`) to verify transactional serialization, unique constraints, and concurrency race conditions:
 
 ```bash
-# Run all 27 unit, integration, and API tests
 pytest -v
 ```
 
+All 31 unit, integration, and API tests:
 ```text
 tests/api/test_api_v1.py::test_health_check_endpoint PASSED
 tests/api/test_api_v1.py::test_correlation_id_propagation PASSED
 tests/api/test_api_v1.py::test_session_lifecycle_and_conflict PASSED
 tests/api/test_api_v1.py::test_batch_ingestion_http_status_codes PASSED
 tests/api/test_api_v1.py::test_streaming_export_api PASSED
+tests/integration/test_analysis_service.py::test_traction_circle_calculation PASSED
+tests/integration/test_analysis_service.py::test_braking_corner_performance_analysis PASSED
+tests/integration/test_analysis_service.py::test_powertrain_upshift_detection PASSED
+tests/integration/test_analysis_service.py::test_analysis_api_endpoints PASSED
 tests/integration/test_database_constraints.py::test_quality_flag_check_constraint_enforced PASSED
 tests/integration/test_database_constraints.py::test_duplicate_channel_timestamp_rejected PASSED
 tests/integration/test_database_constraints.py::test_idempotency_key_unique_per_session PASSED
@@ -172,8 +230,14 @@ tests/integration/test_query_service.py::test_offset_pagination_consistency PASS
 tests/integration/test_query_service.py::test_keyset_cursor_pagination_traversal PASSED
 tests/integration/test_query_service.py::test_streaming_csv_export PASSED
 tests/integration/test_query_service.py::test_streaming_jsonl_export PASSED
-...
-======================== 27 passed in 2.12s ========================
+tests/unit/test_config_logging.py::test_settings_load_defaults PASSED
+tests/unit/test_config_logging.py::test_json_log_formatter PASSED
+tests/unit/test_ingestion_schemas.py::test_valid_telemetry_reading PASSED
+tests/unit/test_ingestion_schemas.py::test_physical_plausibility_brake_pressure PASSED
+tests/unit/test_ingestion_schemas.py::test_physical_plausibility_wheel_speed PASSED
+tests/unit/test_ingestion_schemas.py::test_physical_plausibility_acceleration PASSED
+tests/unit/test_ingestion_schemas.py::test_deterministic_payload_hashing PASSED
+============================== 31 passed in 2.97s ==============================
 ```
 
 ---
@@ -182,20 +246,23 @@ tests/integration/test_query_service.py::test_streaming_jsonl_export PASSED
 
 | Method | Endpoint | Description | Status Codes |
 |---|---|---|---|
-| `GET` | `/health` | Liveness & database connection probe | `200` |
-| `POST` | `/api/v1/sessions` | Register a new vehicle test session | `201`, `409`, `422` |
+| `GET` | `/health` | Liveness and database probe | `200` |
+| `POST` | `/api/v1/sessions` | Create a test session with setup metadata | `201`, `409`, `422` |
 | `GET` | `/api/v1/sessions` | List sessions with pagination and filters | `200` |
-| `GET` | `/api/v1/sessions/{id}` | Retrieve session details and setup metadata | `200`, `404` |
-| `POST` | `/api/v1/sessions/{id}/ingest` | Batch record ingestion (`Idempotency-Key` required) | `201` (new), `200` (replay), `409` (hash conflict), `422` (physics failure) |
-| `GET` | `/api/v1/ingestion-jobs/{id}` | Inspect batch audit status and diagnostics | `200`, `404` |
-| `GET` | `/api/v1/sessions/{id}/records` | Query records with parameterized filters & cursor | `200`, `422` |
-| `GET` | `/api/v1/sessions/{id}/export` | Stream raw data export (`format=csv` or `format=jsonl`) | `200` (chunked transfer) |
+| `GET` | `/api/v1/sessions/{session_id}` | Retrieve session details and setup metadata | `200`, `404` |
+| `POST` | `/api/v1/sessions/{session_id}/ingest` | Ingest batch readings (`Idempotency-Key` required) | `201`, `200` (replay), `409` (conflict), `422` |
+| `GET` | `/api/v1/ingestion-jobs/{job_id}` | Inspect batch audit status and diagnostics | `200`, `404` |
+| `GET` | `/api/v1/sessions/{session_id}/records` | Query records with parameterized filters and cursor | `200`, `422` |
+| `GET` | `/api/v1/sessions/{session_id}/export` | Stream raw dataset export (`format=csv` or `format=jsonl`) | `200` |
+| `GET` | `/api/v1/sessions/{session_id}/analysis/traction-circle` | Compute G-G friction circle and grip envelope | `200`, `404` |
+| `GET` | `/api/v1/sessions/{session_id}/analysis/braking` | Detect braking zones and corner apex dynamics | `200`, `404` |
+| `GET` | `/api/v1/sessions/{session_id}/analysis/powertrain-shifts` | Transmission upshift points and gear ratios | `200`, `404` |
 
 ---
 
 ## Architecture Decision Records (ADRs)
 
-Key architectural trade-offs are documented in `docs/decisions/`:
+Engineering decisions and trade-offs are documented in `docs/decisions/`:
 - [ADR 001: Idempotency Strategy via Database Constraints & SHA-256 Fingerprinting](docs/decisions/001-idempotency-strategy.md)
 - [ADR 002: Concurrency Control and Natural Uniqueness Constraints](docs/decisions/002-concurrency-and-locking.md)
 - [ADR 003: Constant-Memory O(1) Streaming Export Architecture](docs/decisions/003-streaming-export-architecture.md)
