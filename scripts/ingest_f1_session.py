@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Ingest real Formula 1 telemetry datasets (via FastF1 or calibrated session traces).
 
 Fetches or generates synchronized F1 car telemetry (Speed, RPM, Gear, Throttle, Brake,
