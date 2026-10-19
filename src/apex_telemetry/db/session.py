@@ -46,8 +46,17 @@ async def get_db_session() -> AsyncGenerator[AsyncSession]:
             await session.close()
 
 
-async def ping_database() -> dict[str, Any]:
+async def ping_database(session: AsyncSession | None = None) -> dict[str, Any]:
     """Execute a simple query to verify database connectivity and fetch engine info."""
+    if session is not None:
+        result = await session.execute(text("SELECT 1 AS is_alive, version() AS db_version;"))
+        row = result.mappings().one()
+        return {
+            "status": "healthy",
+            "is_alive": row["is_alive"] == 1,
+            "version": row["db_version"],
+        }
+
     async with engine.connect() as conn:
         result = await conn.execute(text("SELECT 1 AS is_alive, version() AS db_version;"))
         row = result.mappings().one()

@@ -39,3 +39,28 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
         finally:
             await session.rollback()
             await session.close()
+
+
+@pytest.fixture
+async def api_client():
+    """Provide an HTTPX AsyncClient wired to FastAPI with test session dependency override."""
+    from httpx import ASGITransport, AsyncClient
+
+    from apex_telemetry.api.deps import get_db
+    from apex_telemetry.main import app
+
+    async def _override_get_db():
+        async with test_session_factory() as session:
+            try:
+                yield session
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                await session.close()
+
+    app.dependency_overrides[get_db] = _override_get_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        yield client
+    app.dependency_overrides.clear()
