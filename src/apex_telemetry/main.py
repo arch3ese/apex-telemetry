@@ -121,7 +121,7 @@ async def concurrency_conflict_handler(
 @app.exception_handler(BatchValidationError)
 async def batch_validation_handler(request: Request, exc: BatchValidationError) -> JSONResponse:
     return _error_response(
-        status.HTTP_422_UNPROCESSABLE_ENTITY, "Validation Error", exc.message, exc.details
+        status.HTTP_422_UNPROCESSABLE_CONTENT, "Validation Error", exc.message, exc.details
     )
 
 
@@ -130,8 +130,8 @@ async def pydantic_validation_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     return _error_response(
-        status.HTTP_422_UNPROCESSABLE_ENTITY,
-        "Unprocessable Entity",
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "Unprocessable Content",
         "Request body or parameters failed validation schema.",
         {"errors": exc.errors()},
     )
