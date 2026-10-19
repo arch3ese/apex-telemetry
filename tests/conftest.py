@@ -25,6 +25,12 @@ test_session_factory = async_sessionmaker(
 
 
 @pytest.fixture
+def session_factory():
+    """Provide the async session factory for tests that manage their own session lifecycle."""
+    return test_session_factory
+
+
+@pytest.fixture
 async def db_session() -> AsyncGenerator[AsyncSession]:
     """Provide a real PostgreSQL async session for integration tests, rolling back on completion."""
     async with test_session_factory() as session:
