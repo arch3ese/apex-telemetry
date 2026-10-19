@@ -210,3 +210,21 @@ async def test_analysis_api_endpoints(api_client, db_session: AsyncSession):
     assert pwr_resp.status_code == 200
     pwr_data = pwr_resp.json()
     assert pwr_data["total_upshifts"] == 1
+
+    # 4. Traction Circle Plot Image Endpoint
+    plot_resp = await api_client.get(f"/api/v1/sessions/{session_id}/analysis/traction-circle/plot")
+    assert plot_resp.status_code == 200
+    assert "image/png" in plot_resp.headers["content-type"]
+    assert len(plot_resp.content) > 1000
+    assert plot_resp.content.startswith(b"\x89PNG")
+
+
+@pytest.mark.asyncio
+async def test_traction_circle_plot_service(db_session: AsyncSession):
+    session_id = await _create_test_session_with_dynamics(db_session)
+    service = VehicleDynamicsAnalysisService(db_session)
+
+    image_bytes = await service.generate_traction_circle_plot(session_id)
+    assert isinstance(image_bytes, bytes)
+    assert len(image_bytes) > 1000
+    assert image_bytes.startswith(b"\x89PNG")

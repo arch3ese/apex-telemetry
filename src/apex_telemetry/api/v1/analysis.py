@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apex_telemetry.api.deps import get_db
@@ -30,6 +30,31 @@ async def get_traction_circle(
     """Compute lateral vs longitudinal acceleration envelope, combined grip, and friction utilization."""
     service = VehicleDynamicsAnalysisService(db)
     return await service.compute_traction_circle(session_id, max_points=max_points)
+
+
+@router.get(
+    "/traction-circle/plot",
+    summary="Render G-G traction circle diagram image",
+    responses={
+        200: {
+            "content": {"image/png": {}},
+            "description": "Rendered PNG image of the G-G traction circle friction envelope.",
+        }
+    },
+)
+async def get_traction_circle_plot(
+    session_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    max_points: Annotated[int, Query(ge=50, le=5000, description="Max points to plot")] = 3000,
+) -> Response:
+    """Render and stream a high-resolution PNG plot of the G-G traction circle."""
+    service = VehicleDynamicsAnalysisService(db)
+    image_bytes = await service.generate_traction_circle_plot(session_id, max_points=max_points)
+    return Response(
+        content=image_bytes,
+        media_type="image/png",
+        headers={"Content-Disposition": f'inline; filename="traction_circle_{session_id}.png"'},
+    )
 
 
 @router.get(

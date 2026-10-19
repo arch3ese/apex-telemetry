@@ -73,6 +73,12 @@ Computes the lateral vs. longitudinal acceleration friction ellipse:
 $$\text{Resultant Acceleration } a_{\text{comb}} = \sqrt{a_{\text{lat}}^2 + a_{\text{long}}^2}$$
 Calculates peak cornering grip, peak braking deceleration, 95th percentile sustained grip, and the percentage of lap time spent at high tire utilization ($\ge 80\%$ of peak grip).
 
+Also renders high-resolution G-G diagrams (`GET /api/v1/sessions/{session_id}/analysis/traction-circle/plot` or CLI `scripts/plot_gg_diagram.py`) with concentric g-rings, speed-mapped scatter points, and friction envelope overlays:
+
+<p align="center">
+  <img src="docs/images/gg_diagram.png" alt="G-G Friction Circle Diagram" width="550" />
+</p>
+
 ### 2. Braking Zones and Corner Apex Dynamics
 Detects sustained braking phases ($a_{\text{long}} \le -0.6g$ or brake line pressure $> 5\,\text{bar}$), recording:
 - Brake initiation speed
@@ -215,6 +221,7 @@ tests/integration/test_analysis_service.py::test_traction_circle_calculation PAS
 tests/integration/test_analysis_service.py::test_braking_corner_performance_analysis PASSED
 tests/integration/test_analysis_service.py::test_powertrain_upshift_detection PASSED
 tests/integration/test_analysis_service.py::test_analysis_api_endpoints PASSED
+tests/integration/test_analysis_service.py::test_traction_circle_plot_service PASSED
 tests/integration/test_database_constraints.py::test_quality_flag_check_constraint_enforced PASSED
 tests/integration/test_database_constraints.py::test_duplicate_channel_timestamp_rejected PASSED
 tests/integration/test_database_constraints.py::test_idempotency_key_unique_per_session PASSED
@@ -237,7 +244,7 @@ tests/unit/test_ingestion_schemas.py::test_physical_plausibility_brake_pressure 
 tests/unit/test_ingestion_schemas.py::test_physical_plausibility_wheel_speed PASSED
 tests/unit/test_ingestion_schemas.py::test_physical_plausibility_acceleration PASSED
 tests/unit/test_ingestion_schemas.py::test_deterministic_payload_hashing PASSED
-============================== 31 passed in 2.97s ==============================
+============================== 32 passed in 3.10s ==============================
 ```
 
 ---
@@ -255,6 +262,7 @@ tests/unit/test_ingestion_schemas.py::test_deterministic_payload_hashing PASSED
 | `GET` | `/api/v1/sessions/{session_id}/records` | Query records with parameterized filters and cursor | `200`, `422` |
 | `GET` | `/api/v1/sessions/{session_id}/export` | Stream raw dataset export (`format=csv` or `format=jsonl`) | `200` |
 | `GET` | `/api/v1/sessions/{session_id}/analysis/traction-circle` | Compute G-G friction circle and grip envelope | `200`, `404` |
+| `GET` | `/api/v1/sessions/{session_id}/analysis/traction-circle/plot` | Stream rendered high-resolution PNG G-G plot | `200`, `404` |
 | `GET` | `/api/v1/sessions/{session_id}/analysis/braking` | Detect braking zones and corner apex dynamics | `200`, `404` |
 | `GET` | `/api/v1/sessions/{session_id}/analysis/powertrain-shifts` | Transmission upshift points and gear ratios | `200`, `404` |
 

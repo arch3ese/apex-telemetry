@@ -1,3 +1,4 @@
+import io
 import math
 import uuid
 from typing import Any
@@ -144,6 +145,207 @@ class VehicleDynamicsAnalysisService:
             high_utilization_pct=high_util_pct,
             points=sampled_points,
         )
+
+    async def generate_traction_circle_plot(
+        self, session_id: uuid.UUID, max_points: int = 3000
+    ) -> bytes:
+        """Render a high-resolution G-G traction circle diagram using matplotlib."""
+        import matplotlib
+
+        matplotlib.use("Agg")  # Non-interactive backend safe for web servers
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Circle
+
+        summary = await self.compute_traction_circle(session_id, max_points=max_points)
+        if not summary.points:
+            fig, ax = plt.subplots(figsize=(8, 8), facecolor="#121212")
+            ax.set_facecolor("#121212")
+            ax.text(
+                0.5,
+                0.5,
+                "No acceleration telemetry available for this session",
+                color="#888888",
+                ha="center",
+                va="center",
+                fontsize=13,
+            )
+            ax.axis("off")
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+            plt.close(fig)
+            return buf.getvalue()
+
+        lats = [p.lateral_accel_g for p in summary.points]
+        longs = [p.longitudinal_accel_g for p in summary.points]
+        speeds = [p.speed_kmh if p.speed_kmh is not None else 0.0 for p in summary.points]
+
+        max_g = max(
+            summary.peak_lateral_g,
+            summary.peak_braking_g,
+            summary.peak_longitudinal_accel_g,
+            2.0,
+        )
+        axis_limit = math.ceil(max_g * 1.15 * 2) / 2.0
+
+        fig, ax = plt.subplots(figsize=(9, 9), facecolor="#121212", dpi=150)
+        ax.set_facecolor("#181818")
+
+        # Concentric reference circles (1g increments)
+        for g_ring in range(1, int(axis_limit) + 1):
+            circle = Circle(
+                (0, 0),
+                g_ring,
+                fill=False,
+                color="#333333",
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.7,
+                zorder=1,
+            )
+            ax.add_patch(circle)
+            ax.text(
+                0.05,
+                g_ring + 0.03,
+                f"{g_ring}g",
+                color="#666666",
+                fontsize=8,
+                fontweight="bold",
+                zorder=2,
+            )
+
+        # Crosshairs at origin
+        ax.axhline(0, color="#444444", linewidth=1.2, linestyle="-", zorder=1)
+        ax.axvline(0, color="#444444", linewidth=1.2, linestyle="-", zorder=1)
+
+        # Theoretical / Measured Friction Envelope
+        theta = np.linspace(0, 2 * np.pi, 200)
+        env_x = summary.peak_lateral_g * np.cos(theta)
+        env_y = np.where(
+            np.sin(theta) >= 0,
+            summary.peak_longitudinal_accel_g * np.sin(theta),
+            -summary.peak_braking_g * np.abs(np.sin(theta)),
+        )
+        ax.plot(
+            env_x,
+            env_y,
+            color="#00E5FF",
+            linestyle="-",
+            linewidth=2.0,
+            alpha=0.85,
+            label="Peak Friction Envelope",
+            zorder=3,
+        )
+
+        # 95th percentile sustained grip circle
+        p95_circle = Circle(
+            (0, 0),
+            summary.p95_combined_g,
+            fill=False,
+            color="#FFD700",
+            linestyle=":",
+            linewidth=1.5,
+            alpha=0.85,
+            label=f"p95 Sustained Grip ({summary.p95_combined_g:.2f}g)",
+            zorder=3,
+        )
+        ax.add_patch(p95_circle)
+
+        # Scatter points colored by vehicle speed
+        has_speed = any(s > 0 for s in speeds)
+        if has_speed:
+            scatter = ax.scatter(
+                lats,
+                longs,
+                c=speeds,
+                cmap="plasma",
+                s=20,
+                alpha=0.65,
+                edgecolors="none",
+                zorder=4,
+            )
+            cbar = plt.colorbar(scatter, ax=ax, pad=0.03, shrink=0.85)
+            cbar.set_label("Speed (km/h)", color="#CCCCCC", fontsize=10, labelpad=10)
+            cbar.ax.yaxis.set_tick_params(color="#CCCCCC")
+            plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="#CCCCCC")
+            cbar.outline.set_edgecolor("#333333")
+        else:
+            ax.scatter(
+                lats,
+                longs,
+                color="#00E5FF",
+                s=20,
+                alpha=0.6,
+                edgecolors="none",
+                zorder=4,
+            )
+
+        ax.set_xlim(-axis_limit, axis_limit)
+        ax.set_ylim(-axis_limit, axis_limit)
+        ax.set_aspect("equal", adjustable="box")
+
+        ax.set_xlabel(
+            "Lateral Acceleration (g)\n[ <--- Turn Left | Turn Right ---> ]",
+            color="#E0E0E0",
+            fontsize=10,
+            labelpad=8,
+        )
+        ax.set_ylabel(
+            "Longitudinal Acceleration (g)\n[ <--- Braking | Throttle ---> ]",
+            color="#E0E0E0",
+            fontsize=10,
+            labelpad=8,
+        )
+        ax.set_title(
+            f"G-G Traction Circle (Friction Envelope)\nSession: {session_id}",
+            color="#FFFFFF",
+            fontsize=12,
+            fontweight="bold",
+            pad=15,
+        )
+
+        ax.tick_params(colors="#CCCCCC", labelsize=9)
+        for spine in ax.spines.values():
+            spine.set_color("#333333")
+
+        stats_text = (
+            f"Data Points: {summary.sample_count}\n"
+            f"Peak Lateral: {summary.peak_lateral_g:.2f}g\n"
+            f"Peak Braking: -{summary.peak_braking_g:.2f}g\n"
+            f"Peak Throttle: +{summary.peak_longitudinal_accel_g:.2f}g\n"
+            f"Peak Combined: {summary.peak_combined_g:.2f}g\n"
+            f"p95 Grip: {summary.p95_combined_g:.2f}g\n"
+            f"High Utilization: {summary.high_utilization_pct:.1f}%"
+        )
+        ax.text(
+            0.03,
+            0.97,
+            stats_text,
+            transform=ax.transAxes,
+            color="#E0E0E0",
+            fontsize=8.5,
+            verticalalignment="top",
+            fontfamily="monospace",
+            bbox={
+                "boxstyle": "round,pad=0.5",
+                "facecolor": "#222222",
+                "edgecolor": "#444444",
+                "alpha": 0.85,
+            },
+            zorder=5,
+        )
+
+        ax.legend(
+            loc="lower right",
+            facecolor="#222222",
+            edgecolor="#444444",
+            fontsize=8,
+            labelcolor="#CCCCCC",
+        )
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", bbox_inches="tight", facecolor=fig.get_facecolor(), dpi=150)
+        plt.close(fig)
+        return buf.getvalue()
 
     async def compute_braking_performance(self, session_id: uuid.UUID) -> BrakingPerformanceSummary:
         """Detect and quantify braking zones and corner apex deceleration performance."""
