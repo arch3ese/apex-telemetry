@@ -91,6 +91,26 @@ Analyzes transmission shift points and gear transitions:
 - Calculates pre-shift RPM, landing RPM, and RPM drop ($\Delta \text{RPM}$) to evaluate engine powerband alignment.
 - Computes effective drive ratios ($\text{RPM} / \text{km/h}$) across active gears.
 
+### 4. Handling Balance and Dynamic Understeer Gradient
+Evaluates vehicle yaw response against theoretical neutral steering geometry (Jörge Segers, *Analysis Techniques for Racecar Data Acquisition*, Ch. 7):
+- Computes reference kinematic Ackerman steering angle at the steering wheel:
+$$\delta_{\text{Ackerman}} = \frac{L \cdot a_y}{V^2} \times \frac{180}{\pi} \times SR$$
+  where $L$ is wheelbase ($m$), $a_y$ is lateral acceleration ($m/s^2$), $V$ is vehicle speed ($m/s$), and $SR$ is steering ratio.
+- Evaluates dynamic understeer angle $\alpha_u = |\delta_{sw}| - \delta_{\text{Ackerman}}$:
+  - $\alpha_u > +1.5^\circ$: Understeer (front axle limited grip)
+  - $\alpha_u < -1.5^\circ$: Oversteer (rear axle limited grip)
+  - $|\alpha_u| \le 1.5^\circ$: Neutral handling
+- Calculates operating percentage distribution (% Understeer, % Neutral, % Oversteer) and streams high-resolution dual-pane plots (`GET /api/v1/sessions/{session_id}/analysis/handling-balance/plot`).
+
+### 5. Distance-Domain Lap Comparison and Cumulative Time Delta ($\Delta t$)
+Enables pit-wall lap overlays by converting time-series telemetry into uniform spatial distance domain ($ds = 1.0\,\text{m}$), eliminating time-skew artifacts (Segers Ch. 14):
+- Numerical distance integration: $s(t) = \int V(t) \, dt$
+- Uniform spatial resampling: $V_{\text{ref}}(s)$ and $V_{\text{comp}}(s)$
+- Speed delta channel: $\Delta V(s) = V_{\text{comp}}(s) - V_{\text{ref}}(s)$
+- Cumulative time delta integral:
+$$\Delta t(s) = \int_0^s \left( \frac{1}{V_{\text{comp}}(\sigma)} - \frac{1}{V_{\text{ref}}(\sigma)} \right) d\sigma$$
+- Streams 2-pane telemetry comparison plots with green/red gain/loss shading (`GET /api/v1/sessions/{session_id}/analysis/compare-lap/{comp_session_id}/plot`).
+
 ---
 
 ## Real Motorsport Data Ingestion (FastF1 Integration)
@@ -222,6 +242,8 @@ tests/integration/test_analysis_service.py::test_braking_corner_performance_anal
 tests/integration/test_analysis_service.py::test_powertrain_upshift_detection PASSED
 tests/integration/test_analysis_service.py::test_analysis_api_endpoints PASSED
 tests/integration/test_analysis_service.py::test_traction_circle_plot_service PASSED
+tests/integration/test_analysis_service.py::test_handling_balance_service PASSED
+tests/integration/test_analysis_service.py::test_lap_comparison_service PASSED
 tests/integration/test_database_constraints.py::test_quality_flag_check_constraint_enforced PASSED
 tests/integration/test_database_constraints.py::test_duplicate_channel_timestamp_rejected PASSED
 tests/integration/test_database_constraints.py::test_idempotency_key_unique_per_session PASSED
@@ -244,7 +266,7 @@ tests/unit/test_ingestion_schemas.py::test_physical_plausibility_brake_pressure 
 tests/unit/test_ingestion_schemas.py::test_physical_plausibility_wheel_speed PASSED
 tests/unit/test_ingestion_schemas.py::test_physical_plausibility_acceleration PASSED
 tests/unit/test_ingestion_schemas.py::test_deterministic_payload_hashing PASSED
-============================== 32 passed in 3.10s ==============================
+============================== 34 passed in 5.94s ==============================
 ```
 
 ---
@@ -265,6 +287,10 @@ tests/unit/test_ingestion_schemas.py::test_deterministic_payload_hashing PASSED
 | `GET` | `/api/v1/sessions/{session_id}/analysis/traction-circle/plot` | Stream rendered high-resolution PNG G-G plot | `200`, `404` |
 | `GET` | `/api/v1/sessions/{session_id}/analysis/braking` | Detect braking zones and corner apex dynamics | `200`, `404` |
 | `GET` | `/api/v1/sessions/{session_id}/analysis/powertrain-shifts` | Transmission upshift points and gear ratios | `200`, `404` |
+| `GET` | `/api/v1/sessions/{session_id}/analysis/handling-balance` | Dynamic understeer gradient and yaw balance distribution | `200`, `404` |
+| `GET` | `/api/v1/sessions/{session_id}/analysis/handling-balance/plot` | Stream dual-pane handling balance & understeer plot | `200`, `404` |
+| `GET` | `/api/v1/sessions/{session_id}/analysis/compare-lap/{comp_session_id}` | Distance-domain lap comparison and cumulative time delta | `200`, `404` |
+| `GET` | `/api/v1/sessions/{session_id}/analysis/compare-lap/{comp_session_id}/plot` | Stream 2-pane delta velocity and cumulative time delta plot | `200`, `404` |
 
 ---
 

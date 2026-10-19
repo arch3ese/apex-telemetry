@@ -84,3 +84,66 @@ class PowertrainShiftSummary(BaseModel):
         description="Average engine RPM per unit km/h for each active gear ratio"
     )
     shifts: list[GearShiftEvent]
+
+
+class HandlingBalancePoint(BaseModel):
+    """Point-by-point vehicle cornering handling balance and understeer calculation."""
+
+    distance_m: float = Field(description="Track distance in meters")
+    speed_kmh: float
+    lateral_accel_g: float
+    steering_angle_deg: float = Field(description="Driver steering wheel angle in degrees")
+    ackerman_angle_deg: float = Field(description="Theoretical kinematic Ackerman steer angle")
+    understeer_angle_deg: float = Field(
+        description="Dynamic understeer angle: positive = understeer, negative = oversteer"
+    )
+    handling_state: str = Field(description="'understeer', 'neutral', or 'oversteer'")
+
+
+class HandlingBalanceSummary(BaseModel):
+    """Aggregate handling balance, understeer gradient, and cornering state distribution."""
+
+    session_id: uuid.UUID
+    wheelbase_m: float
+    steering_ratio: float
+    sample_count: int
+    understeer_pct: float = Field(
+        description="Percentage of cornering distance in understeer state"
+    )
+    neutral_pct: float = Field(description="Percentage of cornering distance in neutral state")
+    oversteer_pct: float = Field(description="Percentage of cornering distance in oversteer state")
+    max_understeer_deg: float = Field(description="Peak front-axle scrubbing angle (deg)")
+    max_oversteer_deg: float = Field(description="Peak rear-axle slip / counter-steer angle (deg)")
+    mean_understeer_deg: float
+    points: list[HandlingBalancePoint]
+
+
+class LapComparisonPoint(BaseModel):
+    """Spatial distance-domain comparison point between two laps."""
+
+    distance_m: float
+    ref_speed_kmh: float
+    comp_speed_kmh: float
+    speed_delta_kmh: float = Field(description="comp_speed - ref_speed (positive = comp is faster)")
+    cumulative_time_delta_s: float = Field(
+        description="Integrated time delta in seconds (negative = comp is ahead, positive = ref is ahead)"
+    )
+    ref_throttle: float | None = None
+    comp_throttle: float | None = None
+    ref_brake: float | None = None
+    comp_brake: float | None = None
+
+
+class LapComparisonSummary(BaseModel):
+    """Complete distance-resampled telemetry overlay and delta-time analysis between two sessions."""
+
+    reference_session_id: uuid.UUID
+    comparison_session_id: uuid.UUID
+    total_distance_m: float
+    final_time_delta_s: float = Field(
+        description="Final gap across the lap: negative = comparison is faster, positive = reference is faster"
+    )
+    faster_session_id: uuid.UUID
+    max_time_loss_s: float
+    max_time_gain_s: float
+    points: list[LapComparisonPoint]

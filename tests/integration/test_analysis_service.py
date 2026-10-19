@@ -129,11 +129,75 @@ async def _create_test_session_with_dynamics(db: AsyncSession) -> uuid.UUID:
                     value=0.5 + (step * 0.6),  # Trail braking into 2.9g lateral
                     unit="g",
                 ),
+                TelemetryReadingCreate(
+                    channel_name="steering_angle_deg",
+                    recorded_at=t,
+                    value=18.0 + (step * 8.0),
+                    unit="deg",
+                ),
+                TelemetryReadingCreate(
+                    channel_name="throttle_pct",
+                    recorded_at=t,
+                    value=0.0,
+                    unit="%",
+                ),
             ]
         )
 
+    t15 = datetime(2026, 10, 19, 10, 0, 15, tzinfo=UTC)
+    readings.extend(
+        [
+            TelemetryReadingCreate(
+                channel_name="speed_kmh", recorded_at=t15, value=155.0, unit="km/h"
+            ),
+            TelemetryReadingCreate(
+                channel_name="throttle_pct", recorded_at=t15, value=85.0, unit="%"
+            ),
+            TelemetryReadingCreate(
+                channel_name="brake_pressure_bar", recorded_at=t15, value=0.0, unit="bar"
+            ),
+            TelemetryReadingCreate(
+                channel_name="longitudinal_accel_g", recorded_at=t15, value=1.2, unit="g"
+            ),
+            TelemetryReadingCreate(
+                channel_name="lateral_accel_g", recorded_at=t15, value=1.8, unit="g"
+            ),
+            TelemetryReadingCreate(
+                channel_name="steering_angle_deg", recorded_at=t15, value=20.0, unit="deg"
+            ),
+        ]
+    )
+
     batch = TelemetryBatchCreate(readings=readings)
     await ingest_svc.ingest_batch(session.id, f"dynamics-batch-{uuid.uuid4().hex}", batch)
+    return session.id
+
+
+async def _create_faster_test_session(db: AsyncSession) -> uuid.UUID:
+    session = TestSession(
+        id=uuid.uuid4(),
+        session_slug=f"f1-faster-{uuid.uuid4().hex[:8]}",
+        vehicle_id="F1-W15-02",
+        track_name="Silverstone Circuit",
+    )
+    db.add(session)
+    await db.commit()
+
+    ingest_svc = IngestionService(db)
+    readings: list[TelemetryReadingCreate] = []
+    for i in range(16):
+        t = datetime(2026, 10, 19, 10, 0, i, tzinfo=UTC)
+        speed = 175.0 + (i * 12.0) if i < 10 else 265.0 - ((i - 10) * 18.0)
+        readings.append(
+            TelemetryReadingCreate(
+                channel_name="speed_kmh",
+                recorded_at=t,
+                value=round(speed, 1),
+                unit="km/h",
+            )
+        )
+    batch = TelemetryBatchCreate(readings=readings)
+    await ingest_svc.ingest_batch(session.id, f"faster-batch-{uuid.uuid4().hex}", batch)
     return session.id
 
 
@@ -218,6 +282,39 @@ async def test_analysis_api_endpoints(api_client, db_session: AsyncSession):
     assert len(plot_resp.content) > 1000
     assert plot_resp.content.startswith(b"\x89PNG")
 
+    # 5. Handling Balance Endpoint
+    hb_resp = await api_client.get(f"/api/v1/sessions/{session_id}/analysis/handling-balance")
+    assert hb_resp.status_code == 200
+    hb_data = hb_resp.json()
+    assert hb_data["sample_count"] > 0
+    assert "understeer_pct" in hb_data
+
+    # 6. Handling Balance Plot Endpoint
+    hb_plot_resp = await api_client.get(
+        f"/api/v1/sessions/{session_id}/analysis/handling-balance/plot"
+    )
+    assert hb_plot_resp.status_code == 200
+    assert "image/png" in hb_plot_resp.headers["content-type"]
+    assert hb_plot_resp.content.startswith(b"\x89PNG")
+
+    # 7. Lap Comparison Endpoint
+    comp_session_id = await _create_faster_test_session(db_session)
+    comp_resp = await api_client.get(
+        f"/api/v1/sessions/{session_id}/analysis/compare-lap/{comp_session_id}"
+    )
+    assert comp_resp.status_code == 200
+    comp_data = comp_resp.json()
+    assert comp_data["total_distance_m"] > 0
+    assert len(comp_data["points"]) > 0
+
+    # 8. Lap Comparison Plot Endpoint
+    comp_plot_resp = await api_client.get(
+        f"/api/v1/sessions/{session_id}/analysis/compare-lap/{comp_session_id}/plot"
+    )
+    assert comp_plot_resp.status_code == 200
+    assert "image/png" in comp_plot_resp.headers["content-type"]
+    assert comp_plot_resp.content.startswith(b"\x89PNG")
+
 
 @pytest.mark.asyncio
 async def test_traction_circle_plot_service(db_session: AsyncSession):
@@ -228,3 +325,42 @@ async def test_traction_circle_plot_service(db_session: AsyncSession):
     assert isinstance(image_bytes, bytes)
     assert len(image_bytes) > 1000
     assert image_bytes.startswith(b"\x89PNG")
+
+
+@pytest.mark.asyncio
+async def test_handling_balance_service(db_session: AsyncSession):
+    session_id = await _create_test_session_with_dynamics(db_session)
+    service = VehicleDynamicsAnalysisService(db_session)
+
+    summary = await service.compute_handling_balance(session_id)
+    assert summary.session_id == session_id
+    assert summary.sample_count > 0
+    assert (summary.understeer_pct + summary.neutral_pct + summary.oversteer_pct) == pytest.approx(
+        100.0, abs=0.2
+    )
+    assert len(summary.points) == summary.sample_count
+
+    plot_bytes = await service.generate_handling_balance_plot(session_id)
+    assert isinstance(plot_bytes, bytes)
+    assert len(plot_bytes) > 1000
+    assert plot_bytes.startswith(b"\x89PNG")
+
+
+@pytest.mark.asyncio
+async def test_lap_comparison_service(db_session: AsyncSession):
+    ref_session_id = await _create_test_session_with_dynamics(db_session)
+    comp_session_id = await _create_faster_test_session(db_session)
+    service = VehicleDynamicsAnalysisService(db_session)
+
+    summary = await service.compare_laps(ref_session_id, comp_session_id)
+    assert summary.reference_session_id == ref_session_id
+    assert summary.comparison_session_id == comp_session_id
+    assert summary.total_distance_m > 100.0
+    assert summary.final_time_delta_s < 0.0  # Faster session has negative delta!
+    assert summary.faster_session_id == comp_session_id
+    assert len(summary.points) > 0
+
+    plot_bytes = await service.generate_lap_comparison_plot(ref_session_id, comp_session_id)
+    assert isinstance(plot_bytes, bytes)
+    assert len(plot_bytes) > 1000
+    assert plot_bytes.startswith(b"\x89PNG")
